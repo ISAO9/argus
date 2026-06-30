@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: "ARGUS: Real-Time Seismic Source Characterization for Sparse-Network EGS/CCS Monitoring"
+message: "If you use this software, please cite the accompanying article."
+type: software
+authors:
+  - family-names: Kurosawa
+    given-names: Isao
+repository-code: "https://github.com/ISAO9/argus"
+license: Apache-2.0
+version: "1.0.0"
+preferred-citation:
+  type: article
+  title: "ARGUS: A 17-ms End-to-End Deep Learning Pipeline for Real-Time Seismic Source Characterization and Ground Motion Prediction in Sparse-Network EGS/CCS Environments"
+  authors:
+    - family-names: Kurosawa
+      given-names: Isao
+  journal: "Seismological Research Letters (submitted)"
+  year: 2026

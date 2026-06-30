@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+*.h5
+*.pt
+*.pth
+*.ckpt
+data/raw/
+data/processed/
+PDF/*.pdf
+!PDF/.gitkeep
+models/*.pt
+models/*.pth
+!models/.gitkeep
+.DS_Store

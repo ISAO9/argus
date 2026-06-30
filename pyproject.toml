@@ -1,0 +1,30 @@
+[project]
+name = "argus"
+version = "1.0.0"
+description = "ARGUS: a 17-ms end-to-end deep-learning pipeline for real-time seismic source characterization (location + CMT + PGA) in sparse-network EGS/CCS environments."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Isao Kurosawa" }]
+dependencies = [
+  "torch>=2.1",
+  "torch-geometric>=2.4",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "h5py>=3.8",
+  "obspy>=1.4",
+  "scikit-learn>=1.3",
+  "matplotlib>=3.7",
+  "pyyaml>=6.0",
+  "tqdm>=4.65",
+]
+
+[project.urls]
+Repository = "https://github.com/ISAO9/argus"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

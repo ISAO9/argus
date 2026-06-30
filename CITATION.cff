@@ -6,7 +6,7 @@ authors:
   - family-names: Kurosawa
     given-names: Isao
 repository-code: "https://github.com/ISAO9/argus"
-license: Apache-2.0
+license: MIT
 version: "1.0.0"
 preferred-citation:
   type: article

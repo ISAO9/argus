@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "ARGUS: a 17-ms end-to-end deep-learning pipeline for real-time seismic source characterization (location + CMT + PGA) in sparse-network EGS/CCS environments."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 authors = [{ name = "Isao Kurosawa" }]
 dependencies = [
   "torch>=2.1",

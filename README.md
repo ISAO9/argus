@@ -117,3 +117,5 @@ See `CITATION.cff`.
 ## License
 
 Apache License 2.0 — see `LICENSE`.
+
+**R2 revision note:** see [README_ADDENDUM_R2.md](README_ADDENDUM_R2.md) for the reproducibility audit summary.

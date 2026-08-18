@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "script": "13_35_swift_forge_mt_eval.py",
+    "h5": "/Users/isaokurosawa/SWIFT/data/real/forge2024_dataset.h5",
+    "ckpt": "/Users/isaokurosawa/SWIFT/models/checkpoint_epoch_080.pt",
+    "label_source": "True MT inversion (full non-DC)",
+    "fiso_pred_def": "frac_pred[:,1] (01\u751f\u6210\u5668\u30d8\u30c3\u30c0\u306e(f_dc,f_iso,f_clvd)\u9806\u5e8f\u306b\u57fa\u3065\u304f)"
+  },
+  "n": 148,
+  "accuracy_3class": 0.2635135135135135,
+  "confusion_matrix_true_x_pred": [
+    [
+      39,
+      0,
+      0
+    ],
+    [
+      63,
+      0,
+      0
+    ],
+    [
+      46,
+      0,
+      0
+    ]
+  ],
+  "shear_vs_rest_accuracy": 0.2635135135135135,
+  "pred_class_counts": {
+    "Shear": 148,
+    "Mixed": 0,
+    "Tensile": 0
+  },
+  "per_true_class": {
+    "Shear": {
+      "n": 39,
+      "acc": 1.0
+    },
+    "Mixed": {
+      "n": 63,
+      "acc": 0.0
+    },
+    "Tensile": {
+      "n": 46,
+      "acc": 0.0
+    }
+  },
+  "f_iso_pearson_r": 0.0817183672933505,
+  "f_iso_rmse": 0.19948571459680725
+}

@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+# =============================================================================
+# Script : 13_05_ablation_study.py
+# Project: ARGUS
+#
+# Description:
+#   GNN-Locatorのアブレーション実験。
+#   各コンポーネントの寄与を定量化してNature Communications論文のFigure 5を生成する。
+#
+#   実験条件（4条件）:
+#     ① Full ARGUS         : GATv2 + S-P特徴 + 波形エンコーダ (ベースライン)
+#     ② No GATv2           : GATv2 → 単純MLP (グラフ構造を無視)
+#     ③ No S-P Features    : S-P時間差・tp_times を0にマスク
+#     ④ No Wave Encoder    : 波形エンベディングを0にマスク
+#
+#   各条件を合成データ(v2)で学習 → K-NET実データで評価
+#   → どのコンポーネントが精度に最も寄与しているかを定量化
+#
+#   Usage:
+#     python src/13_05_ablation_study.py
+#     python src/13_05_ablation_study.py --epochs 40 --skip_full
+#
+# =============================================================================
+
+import sys, argparse, logging, time, copy
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODEL_DIR = PROJECT_ROOT / "models" / "locator"
+PDF_DIR   = PROJECT_ROOT / "PDF"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+PDF_DIR.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+log = logging.getLogger(__name__)
+
+
+# =============================================================================
+# ABLATION MODEL VARIANTS
+# =============================================================================
+
+class MLPLocator(nn.Module):
+    """
+    アブレーション① : GATv2なし版
+    グラフ構造を無視して各局の特徴量をMLPで処理し
+    全局の特徴をpoolingして震源推定する。
+    GATv2を使わないため局間の情報伝達がない。
+    """
+    def __init__(self, node_dim: int, hidden: int = 128, dropout: float = 0.1):
+        super().__init__()
+        self.node_enc = nn.Sequential(
+            nn.Linear(node_dim, hidden), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),  nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+        )
+        self.pool_mlp = nn.Sequential(
+            nn.Linear(hidden, hidden*2), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(hidden*2, hidden),
+        )
+        self.mu_head  = nn.Linear(hidden, 3)
+        self.var_head = nn.Linear(hidden, 3)
+
+    def forward(self, x, edge_index, edge_attr):
+        # x: (N, node_dim) — ignore graph structure
+        h = self.node_enc(x)                     # (N, hidden)
+        h = h.mean(dim=0, keepdim=True)          # (1, hidden) — mean pooling
+        h = self.pool_mlp(h).squeeze(0)          # (hidden,)
+        mu     = self.mu_head(h)
+        log_var= self.var_head(h)
+        log_var= torch.clamp(log_var, -4, 4)
+        return mu, log_var
+
+
+def mask_sp_features(graph_data: list) -> list:
+    """S-P特徴なし: tp(dim3) / sp_diffs(dim4) を0マスク。numpy形式で返す。"""
+    masked = []
+    for g in graph_data:
+        g2 = {}
+        for k, v in g.items():
+            g2[k] = v.numpy() if isinstance(v, torch.Tensor) else                     (v.copy() if isinstance(v, np.ndarray) else v)
+        g2["x"] = g2["x"].copy().astype(np.float32)
+        g2["x"][:, 3] = 0.0  # tp_times
+        g2["x"][:, 4] = 0.0  # sp_diffs
+        masked.append(g2)
+    return masked
+
+def mask_wave_features(graph_data: list) -> list:
+    """波形エンコーダなし: wave_emb(dim6~) を0マスク。numpy形式で返す。"""
+    masked = []
+    for g in graph_data:
+        g2 = {}
+        for k, v in g.items():
+            g2[k] = v.numpy() if isinstance(v, torch.Tensor) else                     (v.copy() if isinstance(v, np.ndarray) else v)
+        g2["x"] = g2["x"].copy().astype(np.float32)
+        g2["x"][:, 6:] = 0.0  # wave_emb
+        masked.append(g2)
+    return masked
+
+
+def train_model(model, train_graphs, val_graphs, device,
+                epochs=40, lr=5e-4, patience=15,
+                condition_name=""):
+    """
+    汎用学習ループ。Full ARGUSとMLP variant両方に対応。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "gnn02", PROJECT_ROOT/"src"/"13_02_gnn_locator_model.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    DS  = mod.GraphDataset
+    nll = mod.heteroscedastic_nll
+
+    tds = DS(train_graphs); vds = DS(val_graphs)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=lr*0.01)
+
+    best_loss, patience_cnt = float('inf'), 0
+    history = {"train": [], "val": []}
+
+    log.info(f"\n  [{condition_name}] Training: {epochs}ep  "
+             f"Train:{len(tds)}  Val:{len(vds)}")
+
+    for ep in range(1, epochs+1):
+        model.train(); tr=0.0; tr_n=0
+        for i in torch.randperm(len(tds)).tolist():
+            g = tds[i]
+            x  = torch.nan_to_num(g["x"].to(device), nan=0.0).clamp(-5,5)
+            ei = g["edge_index"].to(device)
+            ea = g["edge_attr"].to(device)
+            y  = g["y"].to(device)
+            opt.zero_grad()
+            mu, lv = model(x, ei, ea)
+            loss = nll(mu, lv, y)
+            if torch.isnan(loss) or torch.isinf(loss): continue
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); tr+=loss.item(); tr_n+=1
+        tr = tr/max(tr_n,1) if tr_n>0 else float('nan')
+
+        model.eval(); vl=0.0; vl_n=0
+        with torch.no_grad():
+            for i in range(len(vds)):
+                g = vds[i]
+                x = torch.nan_to_num(g["x"].to(device), nan=0.0).clamp(-5,5)
+                mu, lv = model(x, g["edge_index"].to(device), g["edge_attr"].to(device))
+                v_loss = nll(mu, lv, g["y"].to(device))
+                if not (torch.isnan(v_loss) or torch.isinf(v_loss)):
+                    vl+=v_loss.item(); vl_n+=1
+        vl = vl/max(vl_n,1) if vl_n>0 else float('nan')
+
+        history["train"].append(tr); history["val"].append(vl)
+        sch.step()
+
+        if not np.isnan(vl) and vl < best_loss:
+            best_loss=vl; patience_cnt=0
+            torch.save({"model_state": model.state_dict(),
+                        "epoch": ep, "val_loss": best_loss},
+                       MODEL_DIR/f"ablation_{condition_name}.pt")
+        else:
+            patience_cnt+=1
+
+        if ep % 10 == 0 or ep == 1:
+            log.info(f"  [{condition_name}] ep{ep:3d}  "
+                     f"tr={tr:.4f}  val={vl:.4f}")
+
+        if patience_cnt >= patience:
+            log.info(f"  [{condition_name}] Early stop ep{ep}")
+            break
+
+    return history, best_loss
+
+
+# =============================================================================
+# EVALUATION
+# =============================================================================
+
+@torch.no_grad()
+def evaluate_condition(model, test_graphs, norm_stats, device) -> dict:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "gnn02", PROJECT_ROOT/"src"/"13_02_gnn_locator_model.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    ds = mod.GraphDataset(test_graphs); ns = norm_stats
+    model.eval(); h, d, lats = [], [], []
+    for i in range(len(ds)):
+        g = ds[i]
+        x = torch.nan_to_num(g["x"].to(device), nan=0.0).clamp(-5,5)
+        t0 = time.perf_counter()
+        mu, _ = model(x, g["edge_index"].to(device), g["edge_attr"].to(device))
+        if device.type == "mps": torch.mps.synchronize()
+        lats.append((time.perf_counter()-t0)*1000)
+        mu_np = mu.cpu().numpy()
+        lp  = mu_np[0]*ns["lat_std"]+ns["lat_mean"]
+        lonp= mu_np[1]*ns["lon_std"]+ns["lon_mean"]
+        dp  = float(np.exp(np.clip(mu_np[2],0,1)*np.log(60.0)))
+        src = g["src_loc"]
+        dlat=(lp-float(src[0]))*111.0
+        dlon=(lonp-float(src[1]))*111.0*np.cos(np.radians(float(src[0])))
+        h.append(np.sqrt(dlat**2+dlon**2))
+        d.append(abs(dp-float(src[2])))
+    return {
+        "horiz_median": float(np.median(h)),
+        "horiz_mean":   float(np.mean(h)),
+        "horiz_p75":    float(np.percentile(h, 75)),
+        "dep_median":   float(np.median(d)),
+        "latency_ms":   float(np.median(lats)),
+        "n":            len(h),
+    }
+
+
+# =============================================================================
+# PDF GENERATION
+# =============================================================================
+
+def generate_pdf(results: dict, histories: dict):
+    import matplotlib; matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    pdf_path = PDF_DIR / "13_05_ablation_study.pdf"
+    conditions = list(results.keys())
+    colors = {'Full ARGUS': '#2e7d32',
+              'No GATv2':   '#c62828',
+              'No S-P':     '#e65100',
+              'No WaveEnc': '#1565c0'}
+
+    with PdfPages(pdf_path) as pdf:
+
+        # ── Page 1: Summary bar charts ──────────────────────────────
+        fig, axes = plt.subplots(1, 3, figsize=(15, 6))
+        fig.patch.set_facecolor('white')
+        fig.suptitle(
+            "ARGUS GNN-Locator — Ablation Study\n"
+            "Component Contribution Analysis (K-NET Kumamoto 2016)",
+            fontsize=13, color='#1a2a3a', fontweight='bold')
+
+        def sa(ax, title):
+            ax.set_facecolor('#f5f7fa')
+            for sp in ax.spines.values(): sp.set_edgecolor('#c8d2dc')
+            ax.tick_params(colors='#455a64', labelsize=9)
+            ax.set_title(title, color='#1565c0', fontsize=10,
+                         pad=6, fontweight='bold')
+
+        # Horizontal error
+        ax = axes[0]
+        vals = [results[c]["horiz_median"] for c in conditions]
+        cols = [colors.get(c, '#607080') for c in conditions]
+        bars = ax.bar(conditions, vals, color=cols, alpha=0.85, width=0.5,
+                      edgecolor='white', linewidth=0.8)
+        for b, v in zip(bars, vals):
+            ax.text(b.get_x()+b.get_width()/2, v+0.3,
+                    f"{v:.1f}km", ha='center', fontsize=9, fontweight='700',
+                    color='#1a2a3a')
+        # Reference lines
+        for ref_val, ref_col, ref_lbl in [(7.0,'#e65100','EQTransformer'),
+                                           (5.0,'#e65100','PhaseLink'),
+                                           (3.0,'#c62828','HYPOINVERSE')]:
+            ax.axhline(y=ref_val, color=ref_col, lw=1, ls=':', alpha=0.6)
+            ax.text(len(conditions)-0.4, ref_val+0.15,
+                    ref_lbl, fontsize=7, color=ref_col, ha='right')
+        sa(ax, "Horizontal Error (km, median)")
+        ax.set_ylabel("Error (km)"); ax.tick_params(axis='x', rotation=15)
+
+        # Depth error
+        ax = axes[1]
+        vals_d = [results[c]["dep_median"] for c in conditions]
+        bars2 = ax.bar(conditions, vals_d, color=cols, alpha=0.85, width=0.5,
+                       edgecolor='white', linewidth=0.8)
+        for b, v in zip(bars2, vals_d):
+            ax.text(b.get_x()+b.get_width()/2, v+0.05,
+                    f"{v:.2f}km", ha='center', fontsize=9, fontweight='700',
+                    color='#1a2a3a')
+        sa(ax, "Depth Error (km, median)")
+        ax.set_ylabel("Error (km)"); ax.tick_params(axis='x', rotation=15)
+
+        # Degradation from Full ARGUS
+        ax = axes[2]
+        full_h = results["Full ARGUS"]["horiz_median"]
+        degradations = [(results[c]["horiz_median"] - full_h) / full_h * 100
+                        for c in conditions]
+        cols_deg = ['#2e7d32' if d <= 0 else '#c62828' for d in degradations]
+        bars3 = ax.bar(conditions, degradations, color=cols_deg,
+                       alpha=0.85, width=0.5, edgecolor='white')
+        for b, v in zip(bars3, degradations):
+            ax.text(b.get_x()+b.get_width()/2,
+                    v + (1 if v >= 0 else -3),
+                    f"{v:+.1f}%", ha='center', fontsize=9, fontweight='700',
+                    color='#1a2a3a')
+        ax.axhline(y=0, color='#1a2a3a', lw=1.5)
+        sa(ax, "Degradation vs Full ARGUS (%)")
+        ax.set_ylabel("Δ Error (%)"); ax.tick_params(axis='x', rotation=15)
+
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+
+        # ── Page 2: Training curves ──────────────────────────────────
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.patch.set_facecolor('white')
+        fig.suptitle("Ablation Study — Training Curves",
+                     fontsize=12, color='#1a2a3a', fontweight='bold')
+
+        for ax, split in zip(axes, ["train", "val"]):
+            for cond, hist in histories.items():
+                if split in hist and hist[split]:
+                    ep = range(1, len(hist[split])+1)
+                    ax.plot(ep, hist[split],
+                            color=colors.get(cond, '#607080'),
+                            lw=1.5, label=cond)
+            sa(ax, f"{split.capitalize()} Loss (NLL)")
+            ax.set_xlabel("Epoch"); ax.set_ylabel("NLL")
+            ax.legend(fontsize=8, framealpha=0.8)
+
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+
+        # ── Page 3: Summary table ────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(13, 5))
+        fig.patch.set_facecolor('white')
+        ax.axis('off')
+        ax.set_title(
+            "ARGUS Ablation Study — Performance Summary\n"
+            "K-NET Kumamoto 2016 (n=104 test events)",
+            fontsize=12, color='#1a2a3a', fontweight='bold', pad=20)
+
+        col_labels = ["Condition", "GATv2", "S-P Features",
+                      "Wave Enc.", "Horiz(km)", "Depth(km)",
+                      "p75(km)", "Latency"]
+        component_flags = {
+            "Full ARGUS":  ("✓", "✓", "✓"),
+            "No GATv2":    ("✗", "✓", "✓"),
+            "No S-P":      ("✓", "✗", "✓"),
+            "No WaveEnc":  ("✓", "✓", "✗"),
+        }
+        rows = []
+        for cond in conditions:
+            r = results[cond]
+            g, s, w = component_flags.get(cond, ("?","?","?"))
+            rows.append([
+                cond, g, s, w,
+                f"{r['horiz_median']:.2f}",
+                f"{r['dep_median']:.2f}",
+                f"{r['horiz_p75']:.2f}",
+                f"{r['latency_ms']:.1f}ms",
+            ])
+
+        tbl = ax.table(cellText=rows, colLabels=col_labels,
+                       cellLoc='center', loc='center',
+                       bbox=[0, 0, 1, 0.85])
+        tbl.auto_set_font_size(False); tbl.set_fontsize(10)
+        tbl.scale(1, 2.2)
+        # Header styling
+        for j in range(len(col_labels)):
+            tbl[0,j].set_facecolor('#1565c0')
+            tbl[0,j].set_text_props(color='white', fontweight='bold')
+        # Full ARGUS row highlight
+        for j in range(len(col_labels)):
+            tbl[1,j].set_facecolor('#e8f5e9')
+        # ✗ rows highlight
+        for i, cond in enumerate(conditions[1:], start=2):
+            for j in range(len(col_labels)):
+                tbl[i,j].set_facecolor('#fff8f5')
+
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+
+    log.info(f"  PDF: {pdf_path}")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ARGUS Script 13_05 — Ablation Study")
+    parser.add_argument("--graph_pt",   type=str,
+                        default="data/locator/hinet_graph_v2.pt")
+    parser.add_argument("--knet_cache", type=str,
+                        default="data/knet_processed/knet_parsed.pt")
+    parser.add_argument("--epochs",     type=int,   default=40)
+    parser.add_argument("--lr",         type=float, default=5e-4)
+    parser.add_argument("--patience",   type=int,   default=15)
+    parser.add_argument("--skip_full",  action="store_true",
+                        help="Skip Full ARGUS training (use best_locator_finetune.pt)")
+    parser.add_argument("--device",     type=str,   default="auto")
+    args = parser.parse_args()
+
+    log.info("="*65)
+    log.info("  ARGUS  |  Script 13_05  |  Ablation Study")
+    log.info("="*65)
+
+    dev = torch.device("mps" if torch.backends.mps.is_available()
+                       else "cuda" if torch.cuda.is_available()
+                       else "cpu") if args.device=="auto" \
+          else torch.device(args.device)
+    log.info(f"  Device: {dev}")
+
+    # ── Load synthetic graph dataset ──────────────────────────────
+    gpt = Path(args.graph_pt) if Path(args.graph_pt).is_absolute() \
+          else PROJECT_ROOT/args.graph_pt
+    log.info(f"\n  Synthetic graph dataset: {gpt}")
+    pdata     = torch.load(gpt, map_location="cpu", weights_only=False)
+    ns        = pdata["norm_stats"]
+    synth_tr  = pdata["graph_data"]["train"]
+    synth_val = pdata["graph_data"]["val"]
+    synth_te  = pdata["graph_data"]["test"]
+    node_dim  = synth_tr[0]["x"].shape[1]
+    edge_dim  = synth_tr[0]["edge_attr"].shape[1]
+    log.info(f"  Synth: train={len(synth_tr)}  val={len(synth_val)}  "
+             f"test={len(synth_te)}")
+    log.info(f"  node_dim={node_dim}  edge_dim={edge_dim}")
+
+    # ── Load K-NET real test graphs (from 13_04 cache) ────────────
+    cache_path = Path(args.knet_cache) if Path(args.knet_cache).is_absolute() \
+                 else PROJECT_ROOT/args.knet_cache
+    knet_test = None
+    if cache_path.exists():
+        log.info(f"\n  K-NET cache: {cache_path}")
+        knet_evs = torch.load(cache_path, weights_only=False)
+
+        # Rebuild graphs from cache using 13_01
+        import importlib.util as ilu
+        spec01 = ilu.spec_from_file_location("gnn01",
+                    PROJECT_ROOT/"src"/"13_01_build_hinet_graph.py")
+        mod01  = ilu.module_from_spec(spec01); spec01.loader.exec_module(mod01)
+
+        enc = mod01.WaveformEncoder(3, pdata["wave_emb_dim"],
+                                      knet_evs[0]["waveforms"].shape[-1]).to(dev)
+        if "encoder_state" in pdata:
+            enc.load_state_dict(pdata["encoder_state"])
+        enc.eval()
+
+        rng  = np.random.default_rng(42)
+        idx  = rng.permutation(len(knet_evs))
+        n_tr = int(len(idx)*.70); n_va = int(len(idx)*.15)
+        test_evs = [knet_evs[i] for i in idx[n_tr+n_va:]]
+
+        knet_test = []
+        for ev in test_evs:
+            wavs = ev["waveforms"]; sta = ev["sta_locs"]
+            with torch.no_grad():
+                wavs_t = torch.nan_to_num(
+                    torch.from_numpy(wavs).to(dev), nan=0.0).clamp(-10,10)
+                emb = enc(wavs_t).cpu().numpy()
+                emb = np.nan_to_num(emb, nan=0.0)
+            ei, ea = mod01.build_edges_knn(sta, k=4)
+            fnet = {"lat":float(ev["src_loc"][0]),
+                    "lon":float(ev["src_loc"][1]),
+                    "depth_km":float(ev["src_loc"][2])}
+            g = mod01.build_graph_for_event(
+                waveforms=wavs, sta_locs=sta,
+                tp_times=ev["tp_times"], sp_diffs=ev["sp_diffs"],
+                snr=ev["snr"], src_loc=np.array(
+                    [fnet["lat"],fnet["lon"],max(0.5,fnet["depth_km"])],
+                    np.float32),
+                mw=float(ev["mw"]), edge_index=ei, edge_attr_geo=ea,
+                norm_stats=ns, wave_emb=emb)
+            x = g["x"] if isinstance(g["x"], torch.Tensor) \
+                else torch.tensor(g["x"])
+            x_clean = torch.nan_to_num(x, nan=0.0).clamp(-5, 5)
+            # GraphDataset expects numpy array for "x"
+            g["x"] = x_clean.numpy() if isinstance(x_clean, torch.Tensor)                      else x_clean
+            knet_test.append(g)
+        log.info(f"  K-NET test: {len(knet_test)} events")
+    else:
+        log.warning("  K-NET cache not found → using synthetic test only")
+        knet_test = synth_te
+
+    # ── Load GNN model class ──────────────────────────────────────
+    import importlib.util as ilu
+    spec02 = ilu.spec_from_file_location("gnn02",
+                PROJECT_ROOT/"src"/"13_02_gnn_locator_model.py")
+    mod02  = ilu.module_from_spec(spec02); spec02.loader.exec_module(mod02)
+    GNNLocator = mod02.GNNLocator
+
+    def make_gnn():
+        return GNNLocator(node_dim=node_dim, edge_dim=edge_dim,
+                          hidden=128, heads=4, n_layers=4,
+                          dropout=0.1).to(dev)
+
+    results   = {}
+    histories = {}
+
+    # ══════════════════════════════════════════════════════════════
+    # CONDITION 1: Full ARGUS
+    # ══════════════════════════════════════════════════════════════
+    log.info("\n" + "="*55)
+    log.info("  Condition 1/4: Full ARGUS (baseline)")
+    log.info("="*55)
+
+    if args.skip_full:
+        ft_path = MODEL_DIR / "best_locator_finetune.pt"
+        if ft_path.exists():
+            log.info(f"  Loading fine-tuned model: {ft_path}")
+            ck = torch.load(ft_path, map_location=dev, weights_only=False)
+            m_full = make_gnn()
+            m_full.load_state_dict(ck["model_state"])
+            histories["Full ARGUS"] = {"train": [], "val": []}
+        else:
+            log.warning("  Fine-tuned model not found, training from scratch")
+            args.skip_full = False
+
+    if not args.skip_full:
+        m_full = make_gnn()
+        hist, _ = train_model(m_full, synth_tr, synth_val, dev,
+                               epochs=args.epochs, lr=args.lr,
+                               patience=args.patience,
+                               condition_name="Full ARGUS")
+        # Load best
+        ck = torch.load(MODEL_DIR/"ablation_Full ARGUS.pt",
+                        map_location=dev, weights_only=False)
+        m_full.load_state_dict(ck["model_state"])
+        histories["Full ARGUS"] = hist
+
+    results["Full ARGUS"] = evaluate_condition(m_full, knet_test, ns, dev)
+    log.info(f"  Full ARGUS: horiz={results['Full ARGUS']['horiz_median']:.2f}km  "
+             f"depth={results['Full ARGUS']['dep_median']:.2f}km")
+
+    # ══════════════════════════════════════════════════════════════
+    # CONDITION 2: No GATv2 (MLP only)
+    # ══════════════════════════════════════════════════════════════
+    log.info("\n" + "="*55)
+    log.info("  Condition 2/4: No GATv2 (MLP locator)")
+    log.info("="*55)
+
+    m_mlp = MLPLocator(node_dim=node_dim, hidden=128, dropout=0.1).to(dev)
+    hist_mlp, _ = train_model(m_mlp, synth_tr, synth_val, dev,
+                               epochs=args.epochs, lr=args.lr,
+                               patience=args.patience,
+                               condition_name="No GATv2")
+    ck = torch.load(MODEL_DIR/"ablation_No GATv2.pt",
+                    map_location=dev, weights_only=False)
+    m_mlp.load_state_dict(ck["model_state"])
+    results["No GATv2"]   = evaluate_condition(m_mlp, knet_test, ns, dev)
+    histories["No GATv2"] = hist_mlp
+    log.info(f"  No GATv2: horiz={results['No GATv2']['horiz_median']:.2f}km  "
+             f"depth={results['No GATv2']['dep_median']:.2f}km")
+
+    # ══════════════════════════════════════════════════════════════
+    # CONDITION 3: No S-P Features
+    # ══════════════════════════════════════════════════════════════
+    log.info("\n" + "="*55)
+    log.info("  Condition 3/4: No S-P Features")
+    log.info("="*55)
+
+    sp_train = mask_sp_features(synth_tr)
+    sp_val   = mask_sp_features(synth_val)
+    sp_test  = mask_sp_features(knet_test)
+
+    m_nosp = make_gnn()
+    hist_nosp, _ = train_model(m_nosp, sp_train, sp_val, dev,
+                                epochs=args.epochs, lr=args.lr,
+                                patience=args.patience,
+                                condition_name="No S-P")
+    ck = torch.load(MODEL_DIR/"ablation_No S-P.pt",
+                    map_location=dev, weights_only=False)
+    m_nosp.load_state_dict(ck["model_state"])
+    results["No S-P"]   = evaluate_condition(m_nosp, sp_test, ns, dev)
+    histories["No S-P"] = hist_nosp
+    log.info(f"  No S-P: horiz={results['No S-P']['horiz_median']:.2f}km  "
+             f"depth={results['No S-P']['dep_median']:.2f}km")
+
+    # ══════════════════════════════════════════════════════════════
+    # CONDITION 4: No Wave Encoder
+    # ══════════════════════════════════════════════════════════════
+    log.info("\n" + "="*55)
+    log.info("  Condition 4/4: No Wave Encoder")
+    log.info("="*55)
+
+    we_train = mask_wave_features(synth_tr)
+    we_val   = mask_wave_features(synth_val)
+    we_test  = mask_wave_features(knet_test)
+
+    m_nowe = make_gnn()
+    hist_nowe, _ = train_model(m_nowe, we_train, we_val, dev,
+                                epochs=args.epochs, lr=args.lr,
+                                patience=args.patience,
+                                condition_name="No WaveEnc")
+    ck = torch.load(MODEL_DIR/"ablation_No WaveEnc.pt",
+                    map_location=dev, weights_only=False)
+    m_nowe.load_state_dict(ck["model_state"])
+    results["No WaveEnc"]   = evaluate_condition(m_nowe, we_test, ns, dev)
+    histories["No WaveEnc"] = hist_nowe
+    log.info(f"  No WaveEnc: horiz={results['No WaveEnc']['horiz_median']:.2f}km  "
+             f"depth={results['No WaveEnc']['dep_median']:.2f}km")
+
+    # ══════════════════════════════════════════════════════════════
+    # SUMMARY
+    # ══════════════════════════════════════════════════════════════
+    log.info("\n  ══ Ablation Study Results ════════════════════════")
+    log.info(f"  {'Condition':<18} {'Horiz(km)':>10} {'Depth(km)':>10} "
+             f"{'Δ Horiz':>10} {'Latency':>10}")
+    log.info("  " + "-"*60)
+    full_h = results["Full ARGUS"]["horiz_median"]
+    for cond, res in results.items():
+        delta = res["horiz_median"] - full_h
+        sign  = "+" if delta >= 0 else ""
+        log.info(f"  {cond:<18} {res['horiz_median']:>10.2f} "
+                 f"{res['dep_median']:>10.2f} "
+                 f"{sign+f'{delta:.2f}km':>10} "
+                 f"{res['latency_ms']:>9.1f}ms")
+
+    generate_pdf(results, histories)
+
+    log.info("="*65)
+    log.info("  Script 13_05 complete.")
+    log.info(f"  PDF: {PDF_DIR}/13_05_ablation_study.pdf")
+    log.info("="*65)
+
+
+if __name__ == "__main__":
+    main()

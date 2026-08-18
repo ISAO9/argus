@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "script": "14_15_latency_benchmark.py",
+    "protocol": "warmup 20, 200 reps, median/p95, per-stage + sequential end-to-end; inputs: synthetic 8-sta graph, (1,12,3,1024) waveform, (1,4,128,128) grid"
+  },
+  "mps": {
+    "locator": {
+      "median_ms": 1.4652495010523126,
+      "p95_ms": 2.0803437546419445,
+      "n_rep": 200
+    },
+    "swift": {
+      "median_ms": 6.038833500497276,
+      "p95_ms": 6.078176448863815,
+      "n_rep": 200
+    },
+    "fno": {
+      "median_ms": 3.0187500015017577,
+      "p95_ms": 3.0476853949949145,
+      "n_rep": 200
+    },
+    "end_to_end": {
+      "median_ms": 10.106707999511855,
+      "p95_ms": 10.189570853253826,
+      "n_rep": 200
+    }
+  },
+  "cpu": {
+    "locator": {
+      "median_ms": 0.8936670019465964,
+      "p95_ms": 1.142840998727479,
+      "n_rep": 200
+    },
+    "swift": {
+      "median_ms": 32.87452100266819,
+      "p95_ms": 35.0655645957886,
+      "n_rep": 200
+    },
+    "fno": {
+      "median_ms": 39.73837450394058,
+      "p95_ms": 41.97249024946359,
+      "n_rep": 200
+    },
+    "end_to_end": {
+      "median_ms": 75.71102100337157,
+      "p95_ms": 78.62146519873932,
+      "n_rep": 200
+    }
+  }
+}

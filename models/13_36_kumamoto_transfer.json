@@ -1,0 +1,49 @@
+{
+  "h5": "/Users/isaokurosawa/SWIFT/data/real/kumamoto_dataset.h5",
+  "n_events": 300,
+  "waveform_key": "real/waveforms",
+  "checkpoints": {
+    "checkpoint_epoch_080.pt": {
+      "class_counts": {
+        "Shear": 300,
+        "Mixed": 0,
+        "Tensile": 0
+      },
+      "n": 300,
+      "shear_fraction": 1.0,
+      "mixed_fraction": 0.0,
+      "tensile_fraction": 0.0,
+      "latency_ms_mean": 5.220557473696892,
+      "fiso_mean": 0.2676821731030941,
+      "fiso_median": 0.2532874047756195,
+      "accuracy_vs_h5_labels": 0.3333333333333333,
+      "h5_label_counts": {
+        "Shear": 100,
+        "Mixed": 100,
+        "Tensile": 100
+      },
+      "note_labels": "labels/mt_fracs \u306f 06 \u524d\u51e6\u7406\u7531\u6765(F-net MT\u5206\u89e3)\u3002\u5b9a\u7fa9\u306e\u78ba\u8a8d\u8981\u3002"
+    },
+    "swift_kumamoto_finetune.pt": {
+      "class_counts": {
+        "Shear": 207,
+        "Mixed": 0,
+        "Tensile": 93
+      },
+      "n": 300,
+      "shear_fraction": 0.69,
+      "mixed_fraction": 0.0,
+      "tensile_fraction": 0.31,
+      "latency_ms_mean": 3.9380625526383373,
+      "fiso_mean": 0.4282988824446996,
+      "fiso_median": 0.41715289652347565,
+      "accuracy_vs_h5_labels": 0.3433333333333333,
+      "h5_label_counts": {
+        "Shear": 100,
+        "Mixed": 100,
+        "Tensile": 100
+      },
+      "note_labels": "labels/mt_fracs \u306f 06 \u524d\u51e6\u7406\u7531\u6765(F-net MT\u5206\u89e3)\u3002\u5b9a\u7fa9\u306e\u78ba\u8a8d\u8981\u3002"
+    }
+  }
+}

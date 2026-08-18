@@ -1,0 +1,85 @@
+{
+  "provenance": {
+    "script": "13_39_swift_forge_finetune.py",
+    "h5": "/Users/isaokurosawa/SWIFT/data/real/forge2024_dataset.h5",
+    "ckpt": "/Users/isaokurosawa/SWIFT/models/checkpoint_epoch_080.pt",
+    "seed": 42,
+    "protocol": "PRE-DECLARED: chronological(row-order) 70/30, val=last15% of train, heads-only FT (pat=class,head,frac,fc,out), AdamW lr=0.0001 wd=1e-4 batch=16 <= 50ep patience=10, loss=weighted CE + 0.5*SmoothL1(f_iso), select by val macro-recall, single test eval",
+    "assumption": "h5 row order = chronological (06c filename order)"
+  },
+  "n_train": 88,
+  "n_val": 16,
+  "n_test": 44,
+  "test_true_counts": {
+    "Shear": 5,
+    "Mixed": 19,
+    "Tensile": 20
+  },
+  "zero_shot_test": {
+    "acc": 0.11363636363636363,
+    "macro_recall": 0.3333333333333333,
+    "per_class_recall": {
+      "Shear": 1.0,
+      "Mixed": 0.0,
+      "Tensile": 0.0
+    },
+    "shear_vs_rest": 0.11363636363636363,
+    "confusion_true_x_pred": [
+      [
+        5,
+        0,
+        0
+      ],
+      [
+        19,
+        0,
+        0
+      ],
+      [
+        20,
+        0,
+        0
+      ]
+    ],
+    "pred_counts": {
+      "Shear": 44,
+      "Mixed": 0,
+      "Tensile": 0
+    },
+    "f_iso_r": 0.1925741975277212
+  },
+  "finetuned_test": {
+    "acc": 0.38636363636363635,
+    "macro_recall": 0.2894736842105263,
+    "per_class_recall": {
+      "Shear": 0.0,
+      "Mixed": 0.3684210526315789,
+      "Tensile": 0.5
+    },
+    "shear_vs_rest": 0.7727272727272727,
+    "confusion_true_x_pred": [
+      [
+        0,
+        3,
+        2
+      ],
+      [
+        4,
+        7,
+        8
+      ],
+      [
+        1,
+        9,
+        10
+      ]
+    ],
+    "pred_counts": {
+      "Shear": 5,
+      "Mixed": 19,
+      "Tensile": 20
+    },
+    "f_iso_r": 0.13306152630637622,
+    "f_iso_rmse": 0.18021716136209037
+  }
+}

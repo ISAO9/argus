@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Notice (November 2026):** The results reported in this work (SRL-D-26-00243 and its revision R1) are withdrawn. An audit by the author found that the location results used travel times computed from catalog hypocenters instead of measured picks, and that parts of the methods as described differed from the code. The record is kept for transparency. The author's subsequent study is "How Much Do Waveform-Similar Past Earthquakes Improve Early Epicenters? Preregistered One-Shot Tests on Japanese Aftershock Sequences" (https://github.com/ISAO9/ARGUS-similarity-prior).
+
 # ARGUS
 
 **A**utomated **R**eal-time **G**eophysical **U**nderstanding **S**ystem — a **10-ms**
